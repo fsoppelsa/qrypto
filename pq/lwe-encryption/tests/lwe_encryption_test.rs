@@ -1,4 +1,4 @@
-use pqc::lwe_encryption::{
+use lwe_encryption::lwe_encryption::{
     chi, encode_error_sample, reduce_mod, LweParameters, ModMatrix, ModVector, N, Q,
     SAMPLE_COUNT, SIGMA,
 };
@@ -67,4 +67,3 @@ fn mod_matrix_reduces_values_on_creation() {
     assert_eq!(m.get(0, 0), 0);
     assert_eq!(m.get(0, 1), 126);
 }
-

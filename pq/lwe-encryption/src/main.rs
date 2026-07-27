@@ -1,4 +1,4 @@
-use pqc::lwe_encryption::{decrypt, encrypt, generate_keypair, LweParameters};
+use lwe_encryption::lwe_encryption::{decrypt, encrypt, generate_keypair, LweParameters};
 
 fn main() {
     let params = LweParameters::default();
