@@ -8,9 +8,9 @@ key bits.  Decryption applies the inverse Z^{k2} X^{k1}.
 This module implements QOTP over classical messages: each message byte
 is turned into 8 qubits (|0⟩ or |1⟩), encrypted, then decrypted and measured.
 
-Key: For a 5-byte (40-bit) message it needs 80 key bits = 10 bytes
-(2 key bits per qubit).  The fixed key ``KEY`` is derived from the original
-5-byte XOR key by concatenating it with itself.
+Key: A message of n bytes needs 2n key bytes (two bits per qubit).
+The chat generates a fresh key for each message and shares it in cleartext
+for this educational exercise; this is not secure key distribution.
 
 Backend:
 * IBM Quantum QPU if the environment variable QISKIT_IBM_TOKEN is
@@ -21,6 +21,7 @@ Backend:
 from __future__ import annotations
 
 import os
+import secrets
 
 import numpy as _numpy
 
@@ -51,17 +52,13 @@ _logger.propagate = False
 
 from qiskit import QuantumCircuit
 
-# Our fixed key: 10 bytes = 80 bits (enough for 40 qubits / 5 message bytes)
-KEY = bytes([0x5A, 0x3C, 0x7E, 0x1F, 0x9B, 0x5A, 0x3C, 0x7E, 0x1F, 0x9B])
-
-_MAX_MSG_BYTES = 5
 
 
 # ── Backend selection ────────────────────────────────────────────────────────
 # Set QISKIT_IBM_TOKEN to run on a real IBM Quantum backend.
 
 
-def _get_backend():
+def _get_backend(*, min_num_qubits: int = 1, require_qpu: bool = False):
     """Return a Qiskit backend (IBM Quantum if configured, else BasicSimulator)."""
     token = os.environ.get("QISKIT_IBM_TOKEN")
     if token:
@@ -76,21 +73,22 @@ def _get_backend():
                 backend = service.least_busy(
                     simulator=False,
                     operational=True,
-                    min_num_qubits=1,
+                    min_num_qubits=min_num_qubits,
                 )
+            if require_qpu and getattr(backend, "simulator", False):
+                raise ValueError("selected IBM backend is a simulator")
             print(f"[qotp] IBM Quantum backend: {backend.name}")
             return backend
-        except ImportError:
-            print(
-                "[qotp] qiskit-ibm-runtime not installed, "
-                "falling back to BasicSimulator"
-            )
         except Exception as exc:
+            if require_qpu:
+                raise RuntimeError(f"IBM Quantum QRNG unavailable: {exc}") from exc
             print(
                 f"[qotp] IBM Quantum unavailable ({exc}), "
                 "falling back to BasicSimulator"
             )
 
+    if require_qpu:
+        raise RuntimeError("IBM Quantum QRNG requires QISKIT_IBM_TOKEN")
     from qiskit.providers.basic_provider import BasicSimulator
 
     return BasicSimulator()
@@ -105,6 +103,33 @@ def _run_circuit(qc: QuantumCircuit, *, shots: int = 1) -> str:
     from qiskit.providers.basic_provider import BasicSimulator
 
     if isinstance(backend, BasicSimulator):
+        if qc.num_qubits > 24:
+            # BasicSimulator caps circuits at 24 qubits. QOTP uses only
+            # independent single-qubit gates and measurements.
+            parts = []
+            for offset in range(0, qc.num_qubits, 24):
+                size = min(24, qc.num_qubits - offset)
+                part = QuantumCircuit(size, size)
+                for instruction in qc.data:
+                    indices = [qc.find_bit(q).index for q in instruction.qubits]
+                    if not indices or not offset <= indices[0] < offset + size:
+                        continue
+                    if len(indices) != 1:
+                        raise ValueError("cannot split a multi-qubit operation")
+                    clbits = [
+                        part.clbits[qc.find_bit(c).index - offset]
+                        for c in instruction.clbits
+                    ]
+                    part.append(
+                        instruction.operation,
+                        [part.qubits[indices[0] - offset]],
+                        clbits,
+                    )
+                parts.append(part)
+            return "".join(
+                next(iter(backend.run(part, shots=shots).result().get_counts(part)))
+                for part in reversed(parts)
+            )
         job = backend.run(qc, shots=shots)
         counts = job.result().get_counts(qc)
     else:
@@ -121,6 +146,32 @@ def _run_circuit(qc: QuantumCircuit, *, shots: int = 1) -> str:
 
     return next(iter(counts))
 
+
+def generate_otp_key(message_bytes: int) -> bytes:
+    """Return a fresh QOTP key: two bytes per plaintext byte.
+
+    Use hardware measurements when IBM Quantum is configured; never silently
+    replace a requested QPU measurement with simulated randomness.
+    """
+    if message_bytes < 0:
+        raise ValueError("message length must be nonnegative")
+    key_bytes = 2 * message_bytes
+    if not os.environ.get("QISKIT_IBM_TOKEN") or not key_bytes:
+        return secrets.token_bytes(key_bytes)
+
+    backend = _get_backend(min_num_qubits=8, require_qpu=True)
+    from qiskit.compiler import transpile
+    from qiskit_ibm_runtime import SamplerV2 as Sampler
+
+    qc = QuantumCircuit(8, 8)
+    qc.h(range(8))
+    qc.measure(range(8), range(8))
+    qc = transpile(qc, backend)
+    result = Sampler(mode=backend).run([qc], shots=key_bytes).result()
+    bitstrings = result[0].data[qc.cregs[0].name].get_bitstrings()
+    if len(bitstrings) != key_bytes:
+        raise RuntimeError("IBM Quantum QRNG returned an incomplete key")
+    return bytes(int(bits, 2) for bits in bitstrings)
 
 def _bytes_to_bits(data: bytes) -> list[int]:
     """Convert data to a list of bits (MSB first within each byte)."""
@@ -163,7 +214,7 @@ def _get_key_pairs(key: bytes, n_pairs: int) -> list[tuple[int, int]]:
 # ── Circuit builders ──
 
 
-def qotp_encrypt_circuit(msg: bytes, key: bytes = KEY) -> QuantumCircuit:
+def qotp_encrypt_circuit(msg: bytes, key: bytes) -> QuantumCircuit:
     """Build a circuit that encrypts msg with the QOTP.
 
     The circuit allocates ``8 * len(msg)`` qubits, initialises them to the
@@ -190,7 +241,7 @@ def qotp_encrypt_circuit(msg: bytes, key: bytes = KEY) -> QuantumCircuit:
     return qc
 
 
-def qotp_decrypt_circuit(ciphertext: bytes, key: bytes = KEY) -> QuantumCircuit:
+def qotp_decrypt_circuit(ciphertext: bytes, key: bytes) -> QuantumCircuit:
     """Build a circuit that decrypts ciphertext with the QOTP.
 
     The circuit allocates ``8 * len(ciphertext)`` qubits, initialises them
@@ -230,7 +281,7 @@ def qotp_decrypt_circuit(ciphertext: bytes, key: bytes = KEY) -> QuantumCircuit:
     return qc
 
 
-def qotp_full_circuit(msg: bytes, key: bytes = KEY) -> QuantumCircuit:
+def qotp_full_circuit(msg: bytes, key: bytes) -> QuantumCircuit:
     """Build a circuit that encrypts, decrypts and measures msg.
 
     This is useful for verifying correctness: the measured output should
@@ -271,7 +322,7 @@ def qotp_full_circuit(msg: bytes, key: bytes = KEY) -> QuantumCircuit:
 # Public API
 
 
-def qotp_encrypt(msg: bytes, key: bytes = KEY) -> bytes:
+def qotp_encrypt(msg: bytes, key: bytes) -> bytes:
     """Encrypt *msg* using the QOTP and return the measured ciphertext.
 
     The backend is chosen automatically — see the module docstring.
@@ -286,7 +337,7 @@ def qotp_encrypt(msg: bytes, key: bytes = KEY) -> bytes:
     return _bits_to_bytes(bits)
 
 
-def qotp_decrypt(ciphertext: bytes, key: bytes = KEY) -> bytes:
+def qotp_decrypt(ciphertext: bytes, key: bytes) -> bytes:
     """Decrypt ciphertext produced by :func:`qotp_encrypt`.
 
     Rebuilds qubits from the measured ciphertext bits and applies the

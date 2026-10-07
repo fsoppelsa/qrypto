@@ -17,8 +17,8 @@ Incoming messages are prefixed with ``%``:
 
     % erwin@192.168.1.1:3333 says <<<Hello>>>
 
-The encryption key is currently a fixed constant; it must be replaced
-by a key derived from the BB84 quantum key distribution protocol.
+For this educational exercise each message has a fresh key, sent in cleartext
+alongside its ciphertext. This is NOT secure key distribution or private chat.
 """
 
 import argparse
@@ -29,7 +29,7 @@ import socket
 import threading
 import time
 
-from vernam import KEY, qotp_decrypt, qotp_encrypt
+from vernam import generate_otp_key, qotp_decrypt, qotp_encrypt
 
 # Arrow-key history for the prompt (readline hooks into input() on Unix).
 HISTFILE = os.path.expanduser("~/.qipher_history")
@@ -48,7 +48,20 @@ def _flush_history() -> None:
 atexit.register(_flush_history)
 
 MAX_MSG_BYTES = 5
-VERSION = "0.01"
+
+
+def recv_exact(sock: socket.socket, length: int) -> bytes | None:
+    """Read a complete TCP field, or return None on disconnect."""
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
+VERSION = "0.02"
 
 
 def get_local_ip() -> str:
@@ -125,21 +138,29 @@ class Qipher:
     def handle_incoming(self, conn: socket.socket, addr: tuple) -> None:
         """Read the IDENT handshake from an accepted connection, then receive messages."""
         try:
-            data = conn.recv(128)
+            # Read only the handshake; TCP can coalesce it with the first frame.
+            line = bytearray()
+            while len(line) < 128:
+                char = conn.recv(1)
+                if not char:
+                    conn.close()
+                    return
+                if char == b"\n":
+                    break
+                line.extend(char)
+            else:
+                conn.close()
+                return
         except OSError:
             conn.close()
             return
 
-        if not data:
+        identity = line.decode(errors="replace")
+        if not identity.startswith("IDENT:"):
             conn.close()
             return
 
-        line = data.decode(errors="replace").strip()
-        if not line.startswith("IDENT:"):
-            conn.close()
-            return
-
-        peer_id = line[6:]  # strip "IDENT:" prefix
+        peer_id = identity[6:]
         self.set_peer(conn, peer_id)
         print(f"\n% CONNECTED TO {peer_id}!")
 
@@ -180,17 +201,29 @@ class Qipher:
         """Receive encrypted messages on *sock* and display them."""
         try:
             while self.running:
-                data = sock.recv(MAX_MSG_BYTES)
-                if not data:
+                header = recv_exact(sock, 1)
+                if header is None:
                     break
-
-                print("⚛️  decrypting...")
-                start = time.time()
-                plain = qotp_decrypt(data, KEY)
-                elapsed = time.time() - start
-                print(f"    \033[1m\033[94m[{data.hex()}]\033[0m  ({elapsed:.2f}s)")
-                text = plain.decode(errors="replace")
-                print(f"\n% {peer_id} says \033[1m\033[91m{text}\033[0m")
+                length = header[0]
+                if not 1 <= length <= MAX_MSG_BYTES:
+                    break
+                key = recv_exact(sock, 2 * length)
+                if key is None:
+                    break
+                try:
+                    data = recv_exact(sock, length)
+                    if data is None:
+                        break
+                    print("⚛️  decrypting...")
+                    start = time.time()
+                    plain = qotp_decrypt(data, key)
+                    elapsed = time.time() - start
+                    print(f"    \033[1m\033[94m[{data.hex()}]\033[0m  ({elapsed:.2f}s)")
+                    text = plain.decode(errors="replace")
+                    print(f"\n% {peer_id} says \033[1m\033[91m{text}\033[0m")
+                finally:
+                    del key
+                    print("Trashing OTP key... 🗑️ (dropping reference, not secure erasure)")
         except OSError:
             pass
         finally:
@@ -208,6 +241,10 @@ class Qipher:
         """Encrypt and send *message* to the current peer."""
         msg_bytes = message.encode()
 
+        if not msg_bytes:
+            print("Message must not be empty.")
+            return
+
         if len(msg_bytes) > MAX_MSG_BYTES:
             print(
                 f"Message too long ({len(msg_bytes)} bytes). "
@@ -223,19 +260,29 @@ class Qipher:
             print("Not connected. Use 'talk <host>:<port>' first.")
             return
 
-        print("⚛️  encrypting...")
-        start = time.time()
-        encrypted = qotp_encrypt(msg_bytes, KEY)
-        elapsed = time.time() - start
-        print(f"    \033[1m\033[94m[{encrypted.hex()}]\033[0m  ({elapsed:.2f}s)")
+        print("Generating OTP key... 🔑")
         try:
-            sock.sendall(encrypted)
+            key = generate_otp_key(len(msg_bytes))
+        except Exception as exc:
+            print(f"OTP key generation failed: {exc}")
+            return
+        try:
+            print("⚛️  encrypting...")
+            start = time.time()
+            encrypted = qotp_encrypt(msg_bytes, key)
+            elapsed = time.time() - start
+            print(f"    \033[1m\033[94m[{encrypted.hex()}]\033[0m  ({elapsed:.2f}s)")
+            # Exercise only: sending the raw key defeats secrecy.
+            sock.sendall(bytes([len(msg_bytes)]) + key + encrypted)
         except OSError:
             print(f"Failed to send – connection to {peer} lost.")
             with self.lock:
                 if self.peer_sock is sock:
                     self.peer_sock = None
                     self.peer_id = None
+        finally:
+            del key
+            print("Trashing OTP key... 🗑️ (dropping reference, not secure erasure)")
 
     def shutdown(self) -> None:
         """Stop the listener and close the peer connection."""
@@ -251,7 +298,8 @@ class Qipher:
         self.start_listener()
         print(f"Qipher v{VERSION} started as {self.identity}")
         if os.environ.get("QISKIT_IBM_TOKEN"):
-            print("⚛️  IBM QUANTUM ENABLED")
+            print("⚛️  IBM QUANTUM TOKEN CONFIGURED (QPU checked on send)")
+        print("Exercise only: OTP keys are sent in cleartext; chat is NOT private.")
         print("Commands: \033[1mwhoami\033[0m | \033[1mtalk\033[0m <host>:<port> | \033[1msay\033[0m '<msg>' | \033[1mquit\033[0m")
 
         while self.running:
