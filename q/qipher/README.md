@@ -16,13 +16,12 @@ $|1\rangle$. Alice masks it with two key bits using the Pauli gates:
 - $Z$ **changes the phase** of $|1\rangle$ (it becomes $-|1\rangle$)
   without changing a $0/1$ measurement.
 
-Their matrices are
+Their matrices (rows shown on separate lines) are:
 
-$$
-X=\begin{pmatrix}0&1\\1&0\end{pmatrix},
-\qquad
-Z=\begin{pmatrix}1&0\\0&-1\end{pmatrix}.
-$$
+```text
+X = | 0  1 |     Z = | 1   0 |
+    | 1  0 |         | 0  -1 |
+```
 
 Alice applies $Z$ if the second key bit is 1, then $X$ if the first is 1.
 Bob undoes those gates in reverse order: $X$ first, then $Z$. Each gate
@@ -42,13 +41,14 @@ ciphertext bits; it does not send encrypted qubits between Alice and Bob.
 `src/bb84.py` implements Alice and Bob's BB84 roles. They independently
 choose random bases: the computational ($Z$) basis
 $\{|0\rangle,|1\rangle\}$ or the diagonal ($X$) basis
-$\{|+\rangle,|-\rangle\}$, where
+$\{|+\rangle,|-\rangle\}$. The Hadamard gate changes between these bases:
 
-$$
-H=\frac{1}{\sqrt{2}}\begin{pmatrix}1&1\\1&-1\end{pmatrix},
-\qquad
-|+\rangle=H|0\rangle,\quad |-\rangle=H|1\rangle.
-$$
+```text
+H = (1/√2) | 1   1 |
+           | 1  -1 |
+```
+
+Here $|+\rangle=H|0\rangle$ and $|-\rangle=H|1\rangle$.
 
 1. Alice chooses a random bit and basis per qubit. She applies $X$ for
    bit 1 and $H$ for the diagonal basis.
