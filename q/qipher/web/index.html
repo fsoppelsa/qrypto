@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alice and Bob quantum chat: BB84 + OTP</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.4; background: #fff; color: #111; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+    h1 { margin: 0 0 .5rem; font-size: 1.7rem; }
+    h2 { margin: 0 0 1rem; font-size: 1.25rem; }
+    h3 { margin: 1.5rem 0 .5rem; font-size: 1rem; }
+    p { margin: .5rem 0; }
+    .status, .panel { border: 1px solid #888; padding: 1rem; margin-top: 1rem; }
+    .mode { font-size: 1.25rem; font-weight: 700; margin: 0; }
+    .qpu-art:not([hidden]) { display: block; margin: .5rem 0; }
+    .peers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; margin-top: 1.25rem; align-items: start; }
+    .peers .panel { margin-top: 0; min-width: 0; }
+    .field { margin-top: 1rem; }
+    label { display: block; font-weight: 650; margin-bottom: .35rem; }
+    textarea { display: block; width: 100%; border: 1px solid #888; padding: .5rem; font: inherit; color: inherit; background: #fff; }
+    textarea[readonly] { background: #f5f5f5; }
+    textarea { resize: vertical; min-height: 4.5rem; }
+    .hint { font-size: .9rem; color: #444; }
+    .send-row { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin-top: .75rem; }
+    button { border: 1px solid #555; background: #eee; color: #111; font: inherit; padding: .5rem 1rem; cursor: pointer; }
+    button:hover:not(:disabled) { background: #ddd; }
+    button:disabled { color: #555; cursor: progress; }
+    :focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+    .error { color: #a00; font-weight: 650; }
+    .error:empty { display: none; }
+    .logs { margin: 0; padding-left: 1.5rem; max-height: 13rem; overflow-y: auto; }
+    .logs li { padding: .15rem 0; overflow-wrap: anywhere; }
+    .log-wrap { border-top: 1px solid #aaa; margin-top: 1.5rem; }
+    @media (max-width: 720px) { .peers { grid-template-columns: 1fr; } }
+    @media (max-width: 500px) { main { padding-top: 1rem; } .status, .panel { padding: 1rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Alice and Bob quantum chat: BB84 + OTP</h1>
+    </header>
+
+    <section class="status" aria-label="Backend status">
+      <p id="backend-status" class="mode" role="status">Checking backend…</p>
+      <p id="backend-detail" class="hint">Backend selected from the server's QISKIT_IBM_TOKEN environment variable; no token is entered here.</p>
+      <figure id="qpu-art" class="qpu-art" hidden>
+        <svg width="90" height="100" viewBox="0 0 90 100" role="img" aria-label="Illustration of a quantum computer cryostat">
+          <rect x="2" y="2" width="86" height="96" fill="none" stroke="currentColor"/>
+          <path d="M22 12v72m46-72v72M45 12v82" fill="none" stroke="currentColor"/>
+          <ellipse cx="45" cy="20" rx="33" ry="6" fill="white" stroke="currentColor"/>
+          <ellipse cx="45" cy="39" rx="28" ry="6" fill="white" stroke="currentColor"/>
+          <ellipse cx="45" cy="58" rx="22" ry="6" fill="white" stroke="currentColor"/>
+          <ellipse cx="45" cy="77" rx="15" ry="5" fill="white" stroke="currentColor"/>
+          <path d="M30 20l5 19 3 19 2 19m20-57-5 19-3 19-2 19" fill="none" stroke="currentColor"/>
+        </svg>
+      </figure>
+      <p id="status-error" class="error" role="alert"></p>
+      <p id="activity" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="peers">
+    <section class="panel" id="alice-panel" aria-labelledby="alice-heading">
+      <h2 id="alice-heading">Alice</h2>
+      <div class="field">
+        <label for="alice-key">Shared BB84 key (hex)</label>
+        <textarea id="alice-key" readonly rows="3"></textarea>
+      </div>
+      <div class="field">
+        <label for="alice-ciphertext">Received ciphertext (hex)</label>
+        <textarea id="alice-ciphertext" readonly></textarea>
+      </div>
+      <div class="field">
+        <label for="alice-plaintext">Decoded cleartext received</label>
+        <textarea id="alice-plaintext" readonly></textarea>
+      </div>
+      <form id="alice-form">
+        <div class="field">
+          <label for="alice-message">Message from Alice to Bob</label>
+          <textarea id="alice-message" aria-describedby="alice-hint alice-count" required></textarea>
+          <p class="hint" id="alice-hint">Up to 8 Unicode code points per message.</p>
+          <p class="hint" id="alice-count">0 / 8 code points</p>
+        </div>
+        <div class="send-row">
+          <button type="submit">Send to Bob</button>
+        </div>
+        <p id="alice-error" class="error" role="alert"></p>
+      </form>
+      <div class="log-wrap">
+        <h3 id="alice-log-heading">Alice's event log</h3>
+        <ol id="alice-log" class="logs" aria-labelledby="alice-log-heading" aria-live="polite" aria-relevant="additions"></ol>
+      </div>
+    </section>
+
+    <section class="panel" id="bob-panel" aria-labelledby="bob-heading">
+      <h2 id="bob-heading">Bob</h2>
+      <div class="field">
+        <label for="bob-key">Shared BB84 key (hex)</label>
+        <textarea id="bob-key" readonly rows="3"></textarea>
+      </div>
+      <div class="field">
+        <label for="bob-ciphertext">Received ciphertext (hex)</label>
+        <textarea id="bob-ciphertext" readonly></textarea>
+      </div>
+      <div class="field">
+        <label for="bob-plaintext">Decoded cleartext received</label>
+        <textarea id="bob-plaintext" readonly></textarea>
+      </div>
+      <form id="bob-form">
+        <div class="field">
+          <label for="bob-message">Message from Bob to Alice</label>
+          <textarea id="bob-message" aria-describedby="bob-hint bob-count" required></textarea>
+          <p class="hint" id="bob-hint">Up to 8 Unicode code points per message.</p>
+          <p class="hint" id="bob-count">0 / 8 code points</p>
+        </div>
+        <div class="send-row">
+          <button type="submit">Send to Alice</button>
+        </div>
+        <p id="bob-error" class="error" role="alert"></p>
+      </form>
+      <div class="log-wrap">
+        <h3 id="bob-log-heading">Bob's event log</h3>
+        <ol id="bob-log" class="logs" aria-labelledby="bob-log-heading" aria-live="polite" aria-relevant="additions"></ol>
+      </div>
+    </section>
+    </div>
+  </main>
+
+  <script>
+    const peers = Object.fromEntries(['alice', 'bob'].map(name => [name, {
+      name,
+      form: document.getElementById(`${name}-form`),
+      message: document.getElementById(`${name}-message`),
+      count: document.getElementById(`${name}-count`),
+      button: document.querySelector(`#${name}-form button`),
+      key: document.getElementById(`${name}-key`),
+      ciphertext: document.getElementById(`${name}-ciphertext`),
+      plaintext: document.getElementById(`${name}-plaintext`),
+      error: document.getElementById(`${name}-error`),
+      log: document.getElementById(`${name}-log`)
+    }]));
+    const activity = document.getElementById('activity');
+    let busy = false;
+    let backendMode = null;
+    let backendName = '';
+
+    function logEvent(peer, text) {
+      const entry = document.createElement('li');
+      entry.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+      peer.log.append(entry);
+      peer.log.scrollTop = peer.log.scrollHeight;
+    }
+
+    function setBusy(sender, pending) {
+      busy = pending;
+      for (const peer of Object.values(peers)) {
+        peer.button.disabled = pending;
+        peer.form.setAttribute('aria-busy', String(pending && peer === sender));
+      }
+      sender.button.textContent = pending ? 'Sending…' : `Send to ${sender.name === 'alice' ? 'Bob' : 'Alice'}`;
+      if (pending) activity.textContent = 'Exchanging a fresh key and sending message… This may take time on an IBM QPU.';
+    }
+
+    async function jsonResponse(response) {
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof data?.error === 'string' ? data.error : `Request failed (HTTP ${response.status}).`);
+      }
+      if (!data || typeof data !== 'object') throw new Error('The server returned an invalid response.');
+      return data;
+    }
+
+    async function loadStatus() {
+      const status = document.getElementById('backend-status');
+      const detail = document.getElementById('backend-detail');
+      const illustration = document.getElementById('qpu-art');
+      const error = document.getElementById('status-error');
+      try {
+        const data = await jsonResponse(await fetch('/api/status'));
+        if (data.mode !== 'IBM QPU' && data.mode !== 'Simulator') throw new Error('The server returned an unknown backend.');
+        const qpu = data.mode === 'IBM QPU';
+        if (qpu && (typeof data.backend !== 'string' || !data.backend)) throw new Error('The server did not identify the selected QPU.');
+        backendMode = data.mode;
+        backendName = qpu ? data.backend : '';
+        status.textContent = qpu ? 'IBM QPU POWERED' : 'SIMULATION';
+        detail.textContent = qpu ? `Quantum computer: ${data.backend}` : 'Local BasicSimulator; set QISKIT_IBM_TOKEN in the server shell to use an IBM QPU.';
+        illustration.hidden = !qpu;
+        error.textContent = '';
+      } catch (cause) {
+        backendMode = null;
+        backendName = '';
+        status.textContent = 'BACKEND UNAVAILABLE';
+        detail.textContent = 'Check the server environment and QPU access.';
+        illustration.hidden = true;
+        error.textContent = `Could not load backend status: ${cause.message}`;
+      }
+    }
+
+    for (const sender of Object.values(peers)) {
+      const receiver = peers[sender.name === 'alice' ? 'bob' : 'alice'];
+      sender.message.addEventListener('input', () => {
+        const count = Array.from(sender.message.value).length;
+        sender.count.textContent = `${count} / 8 code points`;
+        sender.count.classList.toggle('error', count > 8);
+      });
+      sender.form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (busy) return;
+        const message = sender.message.value;
+        const count = Array.from(message).length;
+        if (count === 0 || count > 8) {
+          sender.error.textContent = count === 0 ? 'Enter a message before sending.' : 'Use at most 8 Unicode code points.';
+          sender.message.focus();
+          return;
+        }
+        sender.error.textContent = '';
+        setBusy(sender, true);
+        try {
+          await statusReady;
+          if (backendMode === 'IBM QPU') {
+            const start = `Initiating BB84 key exchange on ${backendName}…`;
+            logEvent(sender, start);
+            logEvent(receiver, start);
+          }
+          const result = await jsonResponse(await fetch('/api/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sender: sender.name, message })
+          }));
+          if (result.sender !== sender.name || result.recipient !== receiver.name ||
+              typeof result.key !== 'string' || typeof result.ciphertext !== 'string' ||
+              typeof result.plaintext !== 'string' || typeof result.backend !== 'string') {
+            throw new Error('The server returned an invalid message receipt.');
+          }
+          sender.key.value = result.key;
+          receiver.key.value = result.key;
+          receiver.ciphertext.value = '';
+          receiver.plaintext.value = '';
+          receiver.ciphertext.value = result.ciphertext;
+          receiver.plaintext.value = result.plaintext;
+          sender.message.value = '';
+          sender.count.textContent = '0 / 8 code points';
+          sender.count.classList.remove('error');
+          logEvent(sender, `Fresh BB84 key exchanged (${result.backend}).`);
+          logEvent(receiver, `Fresh BB84 key exchanged (${result.backend}).`);
+          logEvent(sender, `Message sent to ${receiver.name === 'alice' ? 'Alice' : 'Bob'}; ciphertext ${result.ciphertext}.`);
+          logEvent(receiver, `Message received from ${sender.name === 'alice' ? 'Alice' : 'Bob'} and decoded.`);
+          activity.textContent = `Message delivered to ${receiver.name === 'alice' ? 'Alice' : 'Bob'}.`;
+        } catch (cause) {
+          sender.error.textContent = `Could not send message: ${cause.message}`;
+          logEvent(sender, `Send failed: ${cause.message}`);
+          activity.textContent = 'Message was not delivered.';
+        } finally {
+          setBusy(sender, false);
+        }
+      });
+    }
+
+    const statusReady = loadStatus();
+  </script>
+</body>
+</html>

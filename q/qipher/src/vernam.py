@@ -9,8 +9,8 @@ This module implements QOTP over classical messages: each message byte
 is turned into 8 qubits (|0⟩ or |1⟩), encrypted, then decrypted and measured.
 
 Key: A message of n bytes needs 2n key bytes (two bits per qubit).
-The chat generates a fresh key for each message and shares it in cleartext
-for this educational exercise; this is not secure key distribution.
+BB84 is simulated locally to make a fresh key for each message. The chat
+still sends that key in cleartext to the remote peer; it is not private.
 
 Backend:
 * IBM Quantum QPU if the environment variable QISKIT_IBM_TOKEN is
@@ -21,7 +21,6 @@ Backend:
 from __future__ import annotations
 
 import os
-import secrets
 
 import numpy as _numpy
 
@@ -81,34 +80,36 @@ def _get_backend(*, min_num_qubits: int = 1, require_qpu: bool = False):
             return backend
         except Exception as exc:
             if require_qpu:
-                raise RuntimeError(f"IBM Quantum QRNG unavailable: {exc}") from exc
+                raise RuntimeError(f"IBM Quantum backend unavailable: {exc}") from exc
             print(
                 f"[qotp] IBM Quantum unavailable ({exc}), "
                 "falling back to BasicSimulator"
             )
 
     if require_qpu:
-        raise RuntimeError("IBM Quantum QRNG requires QISKIT_IBM_TOKEN")
+        raise RuntimeError("IBM Quantum backend requires QISKIT_IBM_TOKEN")
     from qiskit.providers.basic_provider import BasicSimulator
 
     return BasicSimulator()
 
 
-def _run_circuit(qc: QuantumCircuit, *, shots: int = 1) -> str:
+def _run_circuit(qc: QuantumCircuit, *, shots: int = 1, backend=None) -> str:
     """Run *qc* (which must include measurements) and return the bitstring.
 
     The bitstring is in Qiskit's convention (MSB corresponds to qubit n-1).
     """
-    backend = _get_backend()
+    if backend is None:
+        backend = _get_backend(require_qpu=bool(os.environ.get("QISKIT_IBM_TOKEN")))
     from qiskit.providers.basic_provider import BasicSimulator
 
     if isinstance(backend, BasicSimulator):
-        if qc.num_qubits > 24:
-            # BasicSimulator caps circuits at 24 qubits. QOTP uses only
-            # independent single-qubit gates and measurements.
+        if qc.num_qubits > 8:
+            # BasicSimulator can use 24 qubits, but its state grows
+            # exponentially. These independent operations split into
+            # small circuits without changing the result.
             parts = []
-            for offset in range(0, qc.num_qubits, 24):
-                size = min(24, qc.num_qubits - offset)
+            for offset in range(0, qc.num_qubits, 8):
+                size = min(8, qc.num_qubits - offset)
                 part = QuantumCircuit(size, size)
                 for instruction in qc.data:
                     indices = [qc.find_bit(q).index for q in instruction.qubits]
@@ -147,31 +148,27 @@ def _run_circuit(qc: QuantumCircuit, *, shots: int = 1) -> str:
     return next(iter(counts))
 
 
-def generate_otp_key(message_bytes: int) -> bytes:
-    """Return a fresh QOTP key: two bytes per plaintext byte.
+def generate_otp_key(message_bytes: int, *, backend=None) -> bytes:
+    """Run a local BB84 simulation for two key bytes per plaintext byte.
 
-    Use hardware measurements when IBM Quantum is configured; never silently
-    replace a requested QPU measurement with simulated randomness.
+    Alice and Bob agree on the sifted bits within this process. The caller
+    must still deliver the key to a remote peer; TCP is not a quantum channel.
     """
     if message_bytes < 0:
         raise ValueError("message length must be nonnegative")
-    key_bytes = 2 * message_bytes
-    if not os.environ.get("QISKIT_IBM_TOKEN") or not key_bytes:
-        return secrets.token_bytes(key_bytes)
+    if not message_bytes:
+        return b""
 
-    backend = _get_backend(min_num_qubits=8, require_qpu=True)
-    from qiskit.compiler import transpile
-    from qiskit_ibm_runtime import SamplerV2 as Sampler
+    from .bb84 import exchange_key
 
-    qc = QuantumCircuit(8, 8)
-    qc.h(range(8))
-    qc.measure(range(8), range(8))
-    qc = transpile(qc, backend)
-    result = Sampler(mode=backend).run([qc], shots=key_bytes).result()
-    bitstrings = result[0].data[qc.cregs[0].name].get_bitstrings()
-    if len(bitstrings) != key_bytes:
-        raise RuntimeError("IBM Quantum QRNG returned an incomplete key")
-    return bytes(int(bits, 2) for bits in bitstrings)
+    if backend is None:
+        backend = _get_backend(
+            min_num_qubits=8, require_qpu=bool(os.environ.get("QISKIT_IBM_TOKEN"))
+        )
+    alice_key, bob_key = exchange_key(16 * message_bytes, backend)
+    if alice_key != bob_key:
+        raise RuntimeError("BB84 produced different keys for Alice and Bob")
+    return alice_key
 
 def _bytes_to_bits(data: bytes) -> list[int]:
     """Convert data to a list of bits (MSB first within each byte)."""
@@ -322,22 +319,23 @@ def qotp_full_circuit(msg: bytes, key: bytes) -> QuantumCircuit:
 # Public API
 
 
-def qotp_encrypt(msg: bytes, key: bytes) -> bytes:
+def qotp_encrypt(msg: bytes, key: bytes, *, backend=None) -> bytes:
     """Encrypt *msg* using the QOTP and return the measured ciphertext.
 
-    The backend is chosen automatically — see the module docstring.
+    Uses the selected backend if supplied, otherwise chooses one from the
+    shell environment.
     """
     qc = qotp_encrypt_circuit(msg, key)
     n = qc.num_qubits
     qc.measure(range(n), range(n))
-    bitstring = _run_circuit(qc)
+    bitstring = _run_circuit(qc, backend=backend)
     # Qiskit returns measured bits MSB‑first, but the rightmost qubit
     # in the string is qubit 0.  Reverse to match our convention.
     bits = [int(c) for c in bitstring[::-1]]
     return _bits_to_bytes(bits)
 
 
-def qotp_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+def qotp_decrypt(ciphertext: bytes, key: bytes, *, backend=None) -> bytes:
     """Decrypt ciphertext produced by :func:`qotp_encrypt`.
 
     Rebuilds qubits from the measured ciphertext bits and applies the
@@ -345,6 +343,6 @@ def qotp_decrypt(ciphertext: bytes, key: bytes) -> bytes:
     """
     qc = qotp_decrypt_circuit(ciphertext, key)
     qc.measure(range(qc.num_qubits), range(qc.num_qubits))
-    bitstring = _run_circuit(qc)
+    bitstring = _run_circuit(qc, backend=backend)
     bits = [int(c) for c in bitstring[::-1]]
     return _bits_to_bytes(bits)

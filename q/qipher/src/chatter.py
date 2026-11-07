@@ -1,16 +1,16 @@
 """Quantum OTP Chat – classical chat protocol with quantum one-time-pad encryption.
 
 Usage:
-    python chatter.py <port> <name>
+    python -m src.chatter <port> <name>
 
 Example:
-    python chatter.py 3333 erwin
+    python -m src.chatter 3333 erwin
 
 The process binds to *port* and presents a prompt-based interface:
 
     > whoami          # display your identity
     > talk host:port  # connect to a remote peer
-    > say 'msg'       # send an encrypted message (max 5 bytes)
+    > say 'msg'       # send an encrypted message (max 8 Unicode code points)
     > quit            # exit
 
 Incoming messages are prefixed with ``%``:
@@ -29,7 +29,7 @@ import socket
 import threading
 import time
 
-from vernam import generate_otp_key, qotp_decrypt, qotp_encrypt
+from .vernam import generate_otp_key, qotp_decrypt, qotp_encrypt
 
 # Arrow-key history for the prompt (readline hooks into input() on Unix).
 HISTFILE = os.path.expanduser("~/.qipher_history")
@@ -47,7 +47,8 @@ def _flush_history() -> None:
 
 atexit.register(_flush_history)
 
-MAX_MSG_BYTES = 5
+MAX_MSG_CHARS = 8
+MAX_MSG_BYTES = 4 * MAX_MSG_CHARS  # UTF-8 uses at most four bytes per code point
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes | None:
@@ -245,10 +246,10 @@ class Qipher:
             print("Message must not be empty.")
             return
 
-        if len(msg_bytes) > MAX_MSG_BYTES:
+        if len(message) > MAX_MSG_CHARS:
             print(
-                f"Message too long ({len(msg_bytes)} bytes). "
-                f"Max is {MAX_MSG_BYTES} bytes."
+                f"Message too long ({len(message)} Unicode code points). "
+                f"Max is {MAX_MSG_CHARS} code points."
             )
             return
 

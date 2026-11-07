@@ -1,43 +1,103 @@
 # qipher
 
-A quantum one-time pad (QOTP) chat toy, runs on real IBM Quantum hardware.
+**A toy BB84 and quantum one-time-pad (QOTP) chat demo. Not a secure
+messaging or deployable QKD.** Alice and Bob appear in one local
+web page. Circuits run on a simulator by default or on an IBM QPU
+when configured.
 
-## Quantum Vernam
+![Web app showing Alice sending and Bob decoding a message](img/webapp.png)
 
-Each plaintext byte is encoded into 8 qubits, $|0\rangle$ or $|1\rangle$. 
+## Quantum Vernam (QOTP)
 
-Alice encrypts applying a random Pauli mask per qubit, using 2 key bits $(k_1, k_2)$:
+`src/vernam.py` turns each plaintext bit into a qubit, $|0\rangle$ or
+$|1\rangle$. Alice masks it with two key bits using the Pauli gates:
 
-$$E_{k_1,k_2}(\rho) = X^{k_1} Z^{k_2}\, \rho\, Z^{k_2} X^{k_1}$$
+- $X$ **flips the bit**: $|0\rangle\leftrightarrow|1\rangle$.
+- $Z$ **changes the phase** of $|1\rangle$ (it becomes $-|1\rangle$)
+  without changing a $0/1$ measurement.
 
-Bob decrypts applying the inverse and in reverse order:
+Their matrices are
 
-$$D_{k_1,k_2}(\rho) = Z^{k_2} X^{k_1}\, \rho\, X^{k_1} Z^{k_2}$$
+$$
+X=\begin{pmatrix}0&1\\1&0\end{pmatrix},
+\qquad
+Z=\begin{pmatrix}1&0\\0&-1\end{pmatrix}.
+$$
 
-Since $X^2 = Z^2 = I$, $D_{k_1,k_2} \circ E_{k_1,k_2} = I$: applying the same key twice recovers $\rho$ exactly. With $(k_1,k_2)$ uniform and secret, the encrypted state is maximally mixed to Eve like a quantum analogue of the classical Vernam.
-For an $n$-bit message, the key is $2n$ bits, one $(k_1,k_2)$ pair per qubit, never reused.
+Alice applies $Z$ if the second key bit is 1, then $X$ if the first is 1.
+Bob undoes those gates in reverse order: $X$ first, then $Z$. Each gate
+undoes itself ($X^2=Z^2=I$), so Bob recovers the original qubit.
 
-## Key generation and sharing (educational only)
+One UTF-8 byte has eight bits, so it uses eight qubits and **16 key bits**
+(two per qubit). Eight ASCII characters need 128 key bits; eight
+four-byte emoji need 512. The web app allows at most eight Unicode code
+points per message.
 
-For each message of $n$ bytes, the sender creates a fresh $2n$-byte key.
-Without `QISKIT_IBM_TOKEN`, the key comes from Python's `secrets` generator.
-With an IBM Quantum token, an eight-qubit Hadamard-and-measure circuit runs
-for $2n$ shots on a QPU to produce the key; failure aborts the send rather
-than silently substituting simulated randomness. Set `QISKIT_IBM_BACKEND`
-to choose a backend, or let the program choose an available QPU.
+This demo measures the ciphertext and sends classical bytes. For its
+$|0\rangle$/$|1\rangle$ inputs, $Z$ changes phase but not the displayed
+ciphertext bits; it does not send encrypted qubits between Alice and Bob.
 
-The message frame contains its length, **the raw key**, and the ciphertext.
-The receiver uses the key once and drops its Python reference. The CLI's
-“Trashing OTP key” message does **not** mean secure memory erasure.
-Sending the key in cleartext makes this chat **not private**; this is only
-an exercise until authenticated key distribution (e.g. BB84) is implemented.
+## BB84 key exchange
 
-## Hardware
+`src/bb84.py` implements Alice and Bob's BB84 roles. They independently
+choose random bases: the computational ($Z$) basis
+$\{|0\rangle,|1\rangle\}$ or the diagonal ($X$) basis
+$\{|+\rangle,|-\rangle\}$, where
 
-Circuits run on IBM Quantum backends (e.g. `ibm_marrakesh` or `ibm_fez`) via Qiskit Runtime when configured. The following screenshots illustrate an earlier QPU run, not a performance guarantee:
+$$
+H=\frac{1}{\sqrt{2}}\begin{pmatrix}1&1\\1&-1\end{pmatrix},
+\qquad
+|+\rangle=H|0\rangle,\quad |-\rangle=H|1\rangle.
+$$
 
-![IBM Quantum job analytics](img/ibm_analytics.png)
+1. Alice chooses a random bit and basis per qubit. She applies $X$ for
+   bit 1 and $H$ for the diagonal basis.
+2. Bob independently chooses a basis; he applies $H$ for the diagonal
+   basis, then measures.
+3. They compare **bases, not secret bits**, and discard positions where
+   the bases differ. On average, about half survive this sifting step.
+4. They reveal and discard a random sample of matching bits to estimate
+   the error rate. The demo aborts above 11% sample errors or if the
+   remaining local keys disagree. The unrevealed sifted bits become the
+   fresh key returned by `generate_otp_key` for that message.
 
-Two peers exchanging an encrypted message end-to-end (**erwin** encrypts, **albert** decrypts), each round-tripping through `ibm_fez`:
+The circuits use up to eight qubits per batch. With no token, Qiskit's
+BasicSimulator measures them; with a configured IBM QPU, SamplerV2 runs
+them on that backend. The sample check and threshold are teaching
+mechanics, **not a security proof**.
 
-![Chat session encrypting and decrypting over IBM Quantum](img/flow.png)
+## Run the web app
+
+From the repository root, start in **simulator mode**:
+
+```sh
+unset QISKIT_IBM_TOKEN QISKIT_IBM_BACKEND
+python webapp.py
+```
+
+To use an **IBM QPU**, put only your raw IBM Quantum Platform API token in
+`~/.ibm` (no quotes or `export`). 
+
+```sh
+chmod 600 "$HOME/.ibm"
+. ./load-ibm-token.sh
+python webapp.py
+```
+
+Restart `python webapp.py` to switch modes. The server listens only on
+`127.0.0.1:8000`; open <http://127.0.0.1:8000/>. Alice is on the left,
+Bob on the right. Sending triggers a new local BB84 exchange, QOTP
+encryption, and decoding in the receiver's panel. Both panels show the
+shared key; the receiver's ciphertext and cleartext appear only on
+delivery. In QPU mode, both event logs announce the BB84 exchange when
+it begins.
+
+## Example circuit and job output
+
+![Example Qiskit circuit](img/circuit.png)
+
+![Example measured job result](img/job.png)
+
+## Bibliography
+
+- Thomas Vidick, [*Quantum Cryptography* (CS/Ph 120 course materials)](https://www.weizmann.ac.il/math/vidick/teaching-lecture-notes).
